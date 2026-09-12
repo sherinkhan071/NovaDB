@@ -27,7 +27,7 @@ public class NovaDBApplication {
         // Start all database nodes
         nodeManager.startAllNodes();
 
-        // Give the servers time to start
+        // Give servers time to start
         try {
             Thread.sleep(1000);
         } catch (InterruptedException e) {
@@ -35,26 +35,9 @@ public class NovaDBApplication {
         }
 
         // Create students table on all nodes
-        node1.sendOperation(
-                "localhost",
-                node1.getPort(),
-                "CREATE_TABLE",
-                "students"
-        );
-
-        node2.sendOperation(
-                "localhost",
-                node2.getPort(),
-                "CREATE_TABLE",
-                "students"
-        );
-
-        node3.sendOperation(
-                "localhost",
-                node3.getPort(),
-                "CREATE_TABLE",
-                "students"
-        );
+        createTableIfNeeded(node1);
+        createTableIfNeeded(node2);
+        createTableIfNeeded(node3);
 
         System.out.println();
         System.out.println("NovaDB cluster is ready.");
@@ -63,5 +46,60 @@ public class NovaDBApplication {
         // Start database console
         Console console = new Console(nodeManager);
         console.start();
+    }
+
+    private static void createTableIfNeeded(Node node) {
+
+        try {
+            String response = sendCreateTable(node);
+
+            if (response != null &&
+                    response.startsWith("SUCCESS")) {
+                return;
+            }
+
+        } catch (Exception e) {
+            System.out.println(
+                    "Could not initialize "
+                            + node.getNodeId()
+                            + ": "
+                            + e.getMessage()
+            );
+        }
+    }
+
+    private static String sendCreateTable(Node node) {
+
+        try (
+                java.net.Socket socket =
+                        new java.net.Socket(
+                                "localhost",
+                                node.getPort()
+                        );
+
+                java.io.PrintWriter writer =
+                        new java.io.PrintWriter(
+                                socket.getOutputStream(),
+                                true
+                        );
+
+                java.io.BufferedReader reader =
+                        new java.io.BufferedReader(
+                                new java.io.InputStreamReader(
+                                        socket.getInputStream()
+                                )
+                        )
+        ) {
+
+            writer.println(
+                    "CREATE_TABLE|students"
+            );
+
+            return reader.readLine();
+
+        } catch (Exception e) {
+
+            throw new RuntimeException(e);
+        }
     }
 }

@@ -1,46 +1,77 @@
 package com.novadb.engine;
 
 import java.io.*;
-import java.util.HashMap;
 import java.util.Map;
 
-import com.novadb.model.Row;
 import com.novadb.model.Table;
 
 public class FileManager {
+
+    // -----------------------------------------
+    // NORMAL SAVE
+    // -----------------------------------------
 
     public static void save(
             Map<String, Table> tables,
             String fileName) {
 
+        save(
+                tables,
+                fileName,
+                false
+        );
+    }
+
+    // -----------------------------------------
+    // SAVE WITH SILENT OPTION
+    // -----------------------------------------
+
+    public static void save(
+            Map<String, Table> tables,
+            String fileName,
+            boolean silent) {
+
         try (
                 ObjectOutputStream output =
                         new ObjectOutputStream(
-                                new FileOutputStream(fileName)
+                                new FileOutputStream(
+                                        fileName
+                                )
                         )
         ) {
 
             output.writeObject(tables);
 
-            System.out.println(
-                    "Database saved successfully."
-            );
+            if (!silent) {
+
+                System.out.println(
+                        "Database saved successfully."
+                );
+            }
 
         } catch (Exception e) {
 
-            System.out.println(
-                    "Error saving database: "
-                            + e.getMessage()
-            );
+            if (!silent) {
+
+                System.out.println(
+                        "Error saving database: "
+                                + e.getMessage()
+                );
+            }
         }
     }
+
+    // -----------------------------------------
+    // LOAD DATABASE
+    // -----------------------------------------
 
     @SuppressWarnings("unchecked")
     public static void load(
             Map<String, Table> tables,
             String fileName) {
 
-        File file = new File(fileName);
+        File file =
+                new File(fileName);
 
         if (!file.exists()) {
 
@@ -55,14 +86,19 @@ public class FileManager {
         try (
                 ObjectInputStream input =
                         new ObjectInputStream(
-                                new FileInputStream(file)
+                                new FileInputStream(
+                                        file
+                                )
                         )
         ) {
 
             Map<String, Table> loadedTables =
-                    (Map<String, Table>) input.readObject();
+                    (Map<String, Table>)
+                            input.readObject();
 
-            tables.putAll(loadedTables);
+            tables.putAll(
+                    loadedTables
+            );
 
             System.out.println(
                     "Database loaded successfully from "

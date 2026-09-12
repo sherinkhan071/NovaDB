@@ -1,3 +1,4 @@
+
 package com.novadb.engine;
 
 import java.util.HashMap;
@@ -29,50 +30,94 @@ public class Database {
         FileManager.load(tables, fileName);
     }
 
-    public void execute(String command) {
+    // -----------------------------------------
+    // NORMAL EXECUTE
+    // -----------------------------------------
+
+    public synchronized void execute(String command) {
+
+        execute(command, false);
+    }
+
+    // -----------------------------------------
+    // SILENT EXECUTE
+    // Used by WAL recovery
+    // -----------------------------------------
+
+    public synchronized void execute(
+            String command,
+            boolean silent) {
 
         command = command.trim();
 
         // CREATE TABLE
-        if (command.toLowerCase().startsWith("create table")) {
+        if (command.toLowerCase()
+                .startsWith("create table")) {
 
-            String tableName = command.substring(13).trim();
+            String tableName =
+                    command.substring(13).trim();
 
-            createTable(tableName);
-
+            createTable(
+                    tableName,
+                    silent
+            );
         }
 
         // INSERT INTO
-        else if (command.toLowerCase().startsWith("insert into")) {
+        else if (command.toLowerCase()
+                .startsWith("insert into")) {
 
-            String[] parts = command.split("\\s+", 4);
+            String[] parts =
+                    command.split("\\s+", 4);
 
             if (parts.length < 4) {
-                System.out.println("Invalid INSERT command.");
+
+                if (!silent) {
+                    System.out.println(
+                            "Invalid INSERT command."
+                    );
+                }
+
                 return;
             }
 
             String tableName = parts[2];
             String value = parts[3];
 
-            insertInto(tableName, value);
+            insertInto(
+                    tableName,
+                    value,
+                    silent
+            );
         }
 
         // SELECT * FROM
-        else if (command.toLowerCase().startsWith("select * from")) {
+        else if (command.toLowerCase()
+                .startsWith("select * from")) {
 
-            String remaining = command.substring(13).trim();
+            String remaining =
+                    command.substring(13).trim();
 
             // SELECT WHERE
-            if (remaining.toLowerCase().contains(" where ")) {
+            if (remaining.toLowerCase()
+                    .contains(" where ")) {
 
                 String[] parts =
-                        remaining.split("(?i) where ", 2);
+                        remaining.split(
+                                "(?i) where ",
+                                2
+                        );
 
-                String tableName = parts[0].trim();
-                String searchValue = parts[1].trim();
+                String tableName =
+                        parts[0].trim();
 
-                selectWhere(tableName, searchValue);
+                String searchValue =
+                        parts[1].trim();
+
+                selectWhere(
+                        tableName,
+                        searchValue
+                );
 
             } else {
 
@@ -81,36 +126,61 @@ public class Database {
         }
 
         // DELETE FROM
-        else if (command.toLowerCase().startsWith("delete from")) {
+        else if (command.toLowerCase()
+                .startsWith("delete from")) {
 
-            String[] parts = command.split("\\s+", 4);
+            String[] parts =
+                    command.split("\\s+", 4);
 
             if (parts.length < 4) {
-                System.out.println("Invalid DELETE command.");
+
+                if (!silent) {
+                    System.out.println(
+                            "Invalid DELETE command."
+                    );
+                }
+
                 return;
             }
 
             String tableName = parts[2];
             String value = parts[3];
 
-            deleteRow(tableName, value);
+            deleteRow(
+                    tableName,
+                    value,
+                    silent
+            );
         }
 
         // DROP TABLE
-        else if (command.toLowerCase().startsWith("drop table")) {
+        else if (command.toLowerCase()
+                .startsWith("drop table")) {
 
-            String tableName = command.substring(10).trim();
+            String tableName =
+                    command.substring(10).trim();
 
-            dropTable(tableName);
+            dropTable(
+                    tableName,
+                    silent
+            );
         }
 
         // UPDATE
-        else if (command.toLowerCase().startsWith("update")) {
+        else if (command.toLowerCase()
+                .startsWith("update")) {
 
-            String[] parts = command.split("\\s+", 4);
+            String[] parts =
+                    command.split("\\s+", 4);
 
             if (parts.length < 4) {
-                System.out.println("Invalid UPDATE command.");
+
+                if (!silent) {
+                    System.out.println(
+                            "Invalid UPDATE command."
+                    );
+                }
+
                 return;
             }
 
@@ -118,13 +188,20 @@ public class Database {
             String oldValue = parts[2];
             String newValue = parts[3];
 
-            updateRow(tableName, oldValue, newValue);
+            updateRow(
+                    tableName,
+                    oldValue,
+                    newValue,
+                    silent
+            );
         }
 
         // DESCRIBE
-        else if (command.toLowerCase().startsWith("describe")) {
+        else if (command.toLowerCase()
+                .startsWith("describe")) {
 
-            String tableName = command.substring(8).trim();
+            String tableName =
+                    command.substring(8).trim();
 
             describeTable(tableName);
         }
@@ -132,131 +209,213 @@ public class Database {
         // SAVE
         else if (command.equalsIgnoreCase("save")) {
 
-            FileManager.save(tables, fileName);
+            FileManager.save(
+                    tables,
+                    fileName
+            );
         }
 
         // SHOW TABLES
-        else if (command.equalsIgnoreCase("show tables")) {
+        else if (command.equalsIgnoreCase(
+                "show tables")) {
 
             showTables();
         }
 
         else {
 
-            System.out.println("Unknown command.");
+            if (!silent) {
+                System.out.println(
+                        "Unknown command."
+                );
+            }
         }
     }
 
-    private void createTable(String tableName) {
+    // -----------------------------------------
+    // CREATE TABLE
+    // -----------------------------------------
+
+    private void createTable(
+            String tableName,
+            boolean silent) {
 
         if (tables.containsKey(tableName)) {
 
-            System.out.println("Table already exists.");
+            if (!silent) {
+                System.out.println(
+                        "Table already exists."
+                );
+            }
+
             return;
         }
 
-        tables.put(tableName, new Table());
-
-        System.out.println(
-                "Table '" + tableName +
-                "' created successfully."
+        tables.put(
+                tableName,
+                new Table()
         );
 
-        // Automatically save after creating table
-        FileManager.save(tables, fileName);
+        if (!silent) {
+
+            System.out.println(
+                    "Table '" + tableName +
+                    "' created successfully."
+            );
+        }
+
+        FileManager.save(
+                tables,
+                fileName,
+                silent
+        );
     }
+
+    // -----------------------------------------
+    // INSERT
+    // -----------------------------------------
 
     private void insertInto(
             String tableName,
-            String value) {
+            String value,
+            boolean silent) {
 
-        Table table = tables.get(tableName);
+        Table table =
+                tables.get(tableName);
 
         if (table == null) {
 
-            System.out.println("Table does not exist.");
+            if (!silent) {
+                System.out.println(
+                        "Table does not exist."
+                );
+            }
+
             return;
         }
 
         Row row = new Row();
 
-        String[] values = value.split(",");
+        String[] values =
+                value.split(",");
 
         for (String v : values) {
 
-            row.addValue(v.trim());
+            row.addValue(
+                    v.trim()
+            );
         }
 
         table.addRow(row);
 
-        System.out.println(
-                "Row inserted successfully."
-        );
+        if (!silent) {
 
-        // Automatically save after inserting row
-        FileManager.save(tables, fileName);
+            System.out.println(
+                    "Row inserted successfully."
+            );
+        }
+
+        FileManager.save(
+                tables,
+                fileName,
+                silent
+        );
     }
 
-    private void selectAll(String tableName) {
+    // -----------------------------------------
+    // SELECT ALL
+    // -----------------------------------------
 
-        Table table = tables.get(tableName);
+    private void selectAll(
+            String tableName) {
+
+        Table table =
+                tables.get(tableName);
 
         if (table == null) {
 
-            System.out.println("Table not found.");
+            System.out.println(
+                    "Table not found."
+            );
+
             return;
         }
 
         if (table.getRows().isEmpty()) {
 
-            System.out.println("Table is empty.");
+            System.out.println(
+                    "Table is empty."
+            );
+
             return;
         }
 
         System.out.println("Rows:");
 
-        for (Row row : table.getRows()) {
+        for (Row row :
+                table.getRows()) {
 
-            for (String value : row.getValues()) {
+            for (String value :
+                    row.getValues()) {
 
-                System.out.print(value + " ");
+                System.out.print(
+                        value + " "
+                );
             }
 
             System.out.println();
         }
     }
 
+    // -----------------------------------------
+    // SELECT WHERE
+    // -----------------------------------------
+
     private void selectWhere(
             String tableName,
             String searchValue) {
 
-        Table table = tables.get(tableName);
+        Table table =
+                tables.get(tableName);
 
         if (table == null) {
 
-            System.out.println("Table not found.");
+            System.out.println(
+                    "Table not found."
+            );
+
             return;
         }
 
         if (table.getRows().isEmpty()) {
 
-            System.out.println("Table is empty.");
+            System.out.println(
+                    "Table is empty."
+            );
+
             return;
         }
 
         boolean found = false;
 
-        System.out.println("Matching Rows:");
+        System.out.println(
+                "Matching Rows:"
+        );
 
-        for (Row row : table.getRows()) {
+        for (Row row :
+                table.getRows()) {
 
-            if (row.getValues().contains(searchValue)) {
+            if (row.getValues()
+                    .contains(searchValue)) {
 
                 found = true;
 
-                for (String value : row.getValues()) {
+                for (String value :
+                        row.getValues()) {
 
-                    System.out.print(value + " ");
+                    System.out.print(
+                            value + " "
+                    );
                 }
 
                 System.out.println();
@@ -271,54 +430,90 @@ public class Database {
         }
     }
 
+    // -----------------------------------------
+    // DELETE
+    // -----------------------------------------
+
     private void deleteRow(
             String tableName,
-            String value) {
+            String value,
+            boolean silent) {
 
-        Table table = tables.get(tableName);
+        Table table =
+                tables.get(tableName);
 
         if (table == null) {
 
-            System.out.println("Table not found.");
+            if (!silent) {
+                System.out.println(
+                        "Table not found."
+                );
+            }
+
             return;
         }
 
         boolean removed =
-                table.getRows().removeIf(
-                        row -> row.getValues().contains(value)
-                );
+                table.getRows()
+                        .removeIf(
+                                row ->
+                                        row.getValues()
+                                                .contains(value)
+                        );
 
         if (removed) {
 
-            System.out.println(
-                    "Row deleted successfully."
-            );
+            if (!silent) {
 
-            // Automatically save after deletion
-            FileManager.save(tables, fileName);
+                System.out.println(
+                        "Row deleted successfully."
+                );
+            }
+
+            FileManager.save(
+                    tables,
+                    fileName,
+                    silent
+            );
 
         } else {
 
-            System.out.println(
-                    "Row not found."
-            );
+            if (!silent) {
+
+                System.out.println(
+                        "Row not found."
+                );
+            }
         }
     }
+
+    // -----------------------------------------
+    // UPDATE
+    // -----------------------------------------
 
     private void updateRow(
             String tableName,
             String oldValue,
-            String newValue) {
+            String newValue,
+            boolean silent) {
 
-        Table table = tables.get(tableName);
+        Table table =
+                tables.get(tableName);
 
         if (table == null) {
 
-            System.out.println("Table not found.");
+            if (!silent) {
+
+                System.out.println(
+                        "Table not found."
+                );
+            }
+
             return;
         }
 
-        for (Row row : table.getRows()) {
+        for (Row row :
+                table.getRows()) {
 
             for (int i = 0;
                  i < row.getValues().size();
@@ -329,16 +524,22 @@ public class Database {
                         .equals(oldValue)) {
 
                     row.getValues()
-                            .set(i, newValue);
+                            .set(
+                                    i,
+                                    newValue
+                            );
 
-                    System.out.println(
-                            "Row updated successfully."
-                    );
+                    if (!silent) {
 
-                    // Automatically save after update
+                        System.out.println(
+                                "Row updated successfully."
+                        );
+                    }
+
                     FileManager.save(
                             tables,
-                            fileName
+                            fileName,
+                            silent
                     );
 
                     return;
@@ -346,35 +547,55 @@ public class Database {
             }
         }
 
-        System.out.println(
-                "Value not found."
-        );
-    }
-
-    private void dropTable(String tableName) {
-
-        if (!tables.containsKey(tableName)) {
+        if (!silent) {
 
             System.out.println(
-                    "Table not found."
+                    "Value not found."
             );
+        }
+    }
+
+    // -----------------------------------------
+    // DROP TABLE
+    // -----------------------------------------
+
+    private void dropTable(
+            String tableName,
+            boolean silent) {
+
+        if (!tables.containsKey(
+                tableName)) {
+
+            if (!silent) {
+
+                System.out.println(
+                        "Table not found."
+                );
+            }
 
             return;
         }
 
         tables.remove(tableName);
 
-        System.out.println(
-                "Table '" + tableName +
-                "' dropped successfully."
-        );
+        if (!silent) {
 
-        // Automatically save after dropping table
+            System.out.println(
+                    "Table '" + tableName +
+                    "' dropped successfully."
+            );
+        }
+
         FileManager.save(
                 tables,
-                fileName
+                fileName,
+                silent
         );
     }
+
+    // -----------------------------------------
+    // SHOW TABLES
+    // -----------------------------------------
 
     private void showTables() {
 
@@ -389,7 +610,8 @@ public class Database {
 
         System.out.println("Tables:");
 
-        for (String tableName : tables.keySet()) {
+        for (String tableName :
+                tables.keySet()) {
 
             System.out.println(
                     "- " + tableName
@@ -397,10 +619,15 @@ public class Database {
         }
     }
 
+    // -----------------------------------------
+    // DESCRIBE
+    // -----------------------------------------
+
     private void describeTable(
             String tableName) {
 
-        Table table = tables.get(tableName);
+        Table table =
+                tables.get(tableName);
 
         if (table == null) {
 
@@ -412,19 +639,20 @@ public class Database {
         }
 
         System.out.println(
-                "Table Name : " + tableName
+                "Table Name : "
+                        + tableName
         );
 
         System.out.println(
-                "Total Rows : " +
-                table.getRows().size()
+                "Total Rows : "
+                        + table.getRows().size()
         );
 
         if (!table.getRows().isEmpty()) {
 
             System.out.println(
-                    "Columns    : " +
-                    table.getRows()
+                    "Columns    : "
+                            + table.getRows()
                             .get(0)
                             .getValues()
                             .size()
@@ -437,17 +665,50 @@ public class Database {
             );
         }
     }
-    public Table getTable(String tableName) {
 
-    return tables.get(tableName);
-}
+    // -----------------------------------------
+    // GET TABLE
+    // -----------------------------------------
 
-// Save this node's database
-public void saveDatabase() {
+    public synchronized Table getTable(
+            String tableName) {
 
-    FileManager.save(
-            tables,
-            fileName
-    );
-}
+        return tables.get(tableName);
+    }
+
+    // -----------------------------------------
+    // GET ALL TABLES
+    // Used by Node / distributed SHOW TABLES
+    // -----------------------------------------
+
+    public synchronized Map<String, Table> getTables() {
+
+        return tables;
+    }
+
+    // -----------------------------------------
+    // SAVE DATABASE
+    // -----------------------------------------
+
+    public synchronized void saveDatabase() {
+
+        FileManager.save(
+                tables,
+                fileName
+        );
+    }
+
+    // -----------------------------------------
+    // SILENT SAVE DATABASE
+    // -----------------------------------------
+
+    public synchronized void saveDatabase(
+            boolean silent) {
+
+        FileManager.save(
+                tables,
+                fileName,
+                silent
+        );
+    }
 }
