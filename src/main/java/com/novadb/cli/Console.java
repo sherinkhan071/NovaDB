@@ -1,14 +1,14 @@
 package com.novadb.cli;
 
-import java.util.Arrays;
+import java.io.IOException;
 import java.util.List;
 import java.util.Scanner;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import com.novadb.node.Node;
-import com.novadb.node.NodeManager;
-import com.novadb.node.Reply;
+import com.novadb.engine.Command.Op;
+import com.novadb.engine.Result;
+import com.novadb.net.Client;
 
 public class Console {
 
@@ -23,186 +23,91 @@ public class Console {
     private static final Pattern UPDATE = command(
             "update\\s+(\\S+)\\s+set\\s+(\\w+)\\s*=\\s*(.+?)\\s+where\\s+id\\s*=\\s*(\\S+)");
 
-    private final NodeManager cluster;
+    private final Client client;
 
-    public Console(NodeManager cluster) {
-        this.cluster = cluster;
+    public Console(Client client) {
+        this.client = client;
     }
 
     public void start() {
-
         Scanner scanner = new Scanner(System.in);
-        System.out.println("Type 'help' for commands.");
+        System.out.println("NovaDB. Type 'help' for commands.");
 
         while (true) {
             System.out.print("novadb> ");
-
             if (!scanner.hasNextLine()) {
                 break;
             }
-
             String line = scanner.nextLine().trim();
-
             if (line.equalsIgnoreCase("exit")) {
                 System.out.println("Bye.");
                 break;
             }
-
             if (!line.isEmpty()) {
-                execute(line);
+                try {
+                    execute(line);
+                } catch (IOException e) {
+                    System.out.println("Error: " + e.getMessage());
+                }
             }
         }
     }
 
-    public void execute(String line) {
-
+    private void execute(String line) throws IOException {
         Matcher m;
-
         if ((m = CREATE.matcher(line)).matches()) {
-            print(cluster.createTable(m.group(1)));
+            print(client.execute(Op.CREATE, m.group(1)));
         } else if ((m = DROP.matcher(line)).matches()) {
-            print(cluster.dropTable(m.group(1)));
+            print(client.execute(Op.DROP, m.group(1)));
         } else if ((m = INSERT.matcher(line)).matches()) {
-            print(cluster.insert(m.group(1), m.group(2)));
+            print(client.execute(Op.INSERT, m.group(1), m.group(2)));
         } else if ((m = SELECT.matcher(line)).matches()) {
-            select(m.group(1));
+            list(client.execute(Op.SELECT, m.group(1)), "rows");
         } else if ((m = DELETE.matcher(line)).matches()) {
-            print(cluster.delete(m.group(1), m.group(2)));
+            print(client.execute(Op.DELETE, m.group(1), m.group(2)));
         } else if ((m = UPDATE.matcher(line)).matches()) {
             int column = COLUMNS.indexOf(m.group(2).toLowerCase());
-
             if (column < 0) {
                 System.out.println("Error: Unknown column: " + m.group(2));
             } else {
-                print(cluster.update(m.group(1), m.group(4), column, m.group(3)));
+                print(client.execute(Op.UPDATE, m.group(1), m.group(4),
+                        Integer.toString(column), m.group(3)));
             }
+        } else if (line.equalsIgnoreCase("show tables")) {
+            list(client.execute(Op.TABLES), "tables");
+        } else if (line.equalsIgnoreCase("status")) {
+            for (int id : client.nodeIds()) {
+                String status = client.status(id);
+                System.out.println(status == null ? "node=" + id + " OFFLINE" : status);
+            }
+        } else if (line.equalsIgnoreCase("help")) {
+            System.out.println("""
+                    CREATE TABLE <name>
+                    DROP TABLE <name>
+                    INSERT INTO <table> <id>,<name>,<age>,<city>
+                    SELECT * FROM <table>
+                    UPDATE <table> SET <column> = <value> WHERE id = <id>
+                    DELETE FROM <table> WHERE id = <id>
+                    SHOW TABLES
+                    STATUS
+                    HELP
+                    EXIT""");
         } else {
-            switch (line.toLowerCase()) {
-                case "show tables" -> showTables();
-                case "health" -> health();
-                case "stats" -> stats();
-                case "benchmark" -> benchmark();
-                case "help" -> help();
-                default -> System.out.println(
-                        "Error: Unknown or incomplete command. Type 'help'.");
-            }
+            System.out.println("Error: Unknown or incomplete command. Type 'help'.");
         }
     }
 
-    private void select(String table) {
+    private static void print(Result result) {
+        System.out.println(result.ok() ? "OK" : "Error: " + result.error());
+    }
 
-        Reply reply = cluster.select(table);
-
-        if (!reply.ok()) {
-            print(reply);
+    private static void list(Result result, String noun) {
+        if (!result.ok()) {
+            print(result);
             return;
         }
-
-        String[] rows = reply.body().isEmpty()
-                ? new String[0] : reply.body().split(";");
-
-        for (String row : rows) {
-            System.out.println(row);
-        }
-
-        System.out.println("Total rows: " + rows.length);
-    }
-
-    private void showTables() {
-
-        Reply reply = cluster.showTables();
-
-        if (!reply.ok()) {
-            print(reply);
-        } else if (reply.body().isEmpty()) {
-            System.out.println("No tables found.");
-        } else {
-            for (String table : reply.body().split(",")) {
-                System.out.println("- " + table);
-            }
-        }
-    }
-
-    private void health() {
-
-        for (Node node : cluster.getNodes()) {
-            System.out.println(node.getNodeId() + " : "
-                    + (cluster.health(node).ok() ? "ONLINE" : "OFFLINE"));
-        }
-    }
-
-    private void stats() {
-
-        for (Node node : cluster.getNodes()) {
-            Reply reply = cluster.stats(node);
-
-            if (reply.ok()) {
-                String[] values = reply.body().split("\\|");
-                System.out.println(node.getNodeId() + " : rows=" + values[0]
-                        + " requests=" + values[1]);
-            } else {
-                System.out.println(node.getNodeId() + " : OFFLINE");
-            }
-        }
-    }
-
-    /** Sequential replicated inserts: one client, no concurrency. */
-    private void benchmark() {
-
-        String table = "bench_" + System.currentTimeMillis();
-
-        if (!cluster.createTable(table).ok()) {
-            System.out.println("Error: Could not create the benchmark table.");
-            return;
-        }
-
-        int operations = 500;
-        long[] latencies = new long[operations];
-        long start = System.nanoTime();
-
-        for (int i = 0; i < operations; i++) {
-            long before = System.nanoTime();
-            Reply reply = cluster.insert(table, i + ",Bench,22,Delhi");
-            latencies[i] = System.nanoTime() - before;
-
-            if (!reply.ok()) {
-                print(reply);
-                return;
-            }
-        }
-
-        double seconds = (System.nanoTime() - start) / 1e9;
-        Arrays.sort(latencies);
-
-        System.out.printf("Replicated inserts : %d (1 client)%n", operations);
-        System.out.printf("Throughput         : %.0f writes/sec%n", operations / seconds);
-        System.out.printf("Latency p50        : %.2f ms%n",
-                latencies[operations / 2] / 1e6);
-        System.out.printf("Latency p99        : %.2f ms%n",
-                latencies[operations * 99 / 100 - 1] / 1e6);
-
-        cluster.dropTable(table);
-    }
-
-    private void help() {
-
-        System.out.println("""
-                CREATE TABLE <name>
-                DROP TABLE <name>
-                INSERT INTO <table> <id>,<name>,<age>,<city>
-                SELECT * FROM <table>
-                UPDATE <table> SET <column> = <value> WHERE id = <id>
-                DELETE FROM <table> WHERE id = <id>
-                SHOW TABLES
-                HEALTH
-                STATS
-                BENCHMARK
-                HELP
-                EXIT""");
-    }
-
-    private static void print(Reply reply) {
-        System.out.println((reply.ok() ? "OK: " : "Error: ") + reply.body());
+        result.rows().forEach(System.out::println);
+        System.out.println("(" + result.rows().size() + " " + noun + ")");
     }
 
     private static Pattern command(String regex) {

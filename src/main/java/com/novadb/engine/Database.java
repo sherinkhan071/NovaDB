@@ -1,214 +1,220 @@
 package com.novadb.engine;
 
-import java.io.Closeable;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.regex.Pattern;
 
-import com.novadb.model.Row;
-import com.novadb.model.Table;
-
 /**
- * Every change follows the same three steps: validate, append to the log,
- * apply to memory. Recovery runs the "apply" step on each logged record.
+ * The state machine: tables held in memory. It must be deterministic, so that
+ * every node applying the same commands in the same order ends up identical.
+ * It is not thread-safe; the Raft node calls it while holding its lock.
  */
-public class Database implements Closeable {
+public class Database {
 
-    private static final Pattern TABLE_NAME = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
+    private static final Pattern TABLE_NAME = Pattern.compile("[A-Za-z_][A-Za-z0-9_]{0,63}");
+    private static final int MAX_ROW_LENGTH = 4000;
 
-    private final Map<String, Table> tables = new TreeMap<>();
-    private final WriteAheadLog log;
+    /** The last write applied for one client, and what it returned. */
+    private record Session(long sequence, Result result) {
+    }
 
-    public Database(Path logFile) {
+    // table name -> row id -> values
+    private final Map<String, Map<Long, String[]>> tables = new TreeMap<>();
+    private final Map<String, Session> sessions = new TreeMap<>();
+
+    public Result apply(Command command) {
+
+        if (!command.op().isWrite()) {
+            return run(command);
+        }
+
+        Session last = sessions.get(command.clientId());
+
+        if (last != null && command.sequence() <= last.sequence()) {
+            return command.sequence() == last.sequence()
+                    ? last.result() : Result.failure("Outdated request");
+        }
+
+        Result result = run(command);
+        sessions.put(command.clientId(), new Session(command.sequence(), result));
+        return result;
+    }
+
+    private Result run(Command command) {
+
+        List<String> a = command.args();
 
         try {
-            log = new WriteAheadLog(logFile);
-        } catch (IOException e) {
-            throw new UncheckedIOException("Cannot open " + logFile, e);
-        }
-
-        int line = 0;
-
-        for (String record : log.recoveredRecords()) {
-            line++;
-
-            try {
-                apply(record.split("\\|", -1));
-            } catch (RuntimeException e) {
-                // Refuse to start rather than run with silently missing data.
-                throw new DatabaseException(
-                        "Corrupt log " + logFile + " at line " + line);
-            }
+            return switch (command.op()) {
+                case NOOP -> Result.success();
+                case CREATE -> create(a.get(0));
+                case DROP -> {
+                    table(a.get(0));
+                    tables.remove(a.get(0));
+                    yield Result.success();
+                }
+                case INSERT -> insert(a.get(0), a.get(1));
+                case UPDATE -> update(a.get(0), a.get(1),
+                        Integer.parseInt(a.get(2)), a.get(3));
+                case DELETE -> {
+                    Map<Long, String[]> table = table(a.get(0));
+                    long id = id(a.get(1));
+                    row(table, id);
+                    table.remove(id);
+                    yield Result.success();
+                }
+                case SELECT -> Result.of(table(a.get(0)).values().stream()
+                        .map(values -> String.join(",", values)).toList());
+                case TABLES -> Result.of(new ArrayList<>(tables.keySet()));
+            };
+        } catch (IllegalArgumentException e) {
+            return Result.failure(e.getMessage());
+        } catch (IndexOutOfBoundsException e) {
+            return Result.failure("Malformed command");
         }
     }
 
-    public synchronized void createTable(String name) {
+    private Result create(String name) {
 
         if (!TABLE_NAME.matcher(name).matches()) {
-            throw new DatabaseException("Invalid table name: " + name);
+            throw new IllegalArgumentException("Invalid table name: " + name);
         }
-
-        if (tables.containsKey(name)) {
-            throw new DatabaseException("Table already exists: " + name);
+        if (tables.putIfAbsent(name, new LinkedHashMap<>()) != null) {
+            throw new IllegalArgumentException("Table already exists: " + name);
         }
-
-        commit("CREATE", name);
+        return Result.success();
     }
 
-    public synchronized void dropTable(String name) {
+    private Result insert(String name, String row) {
 
-        table(name);
-        commit("DROP", name);
-    }
-
-    /** @param row comma-separated values; the first is the numeric id */
-    public synchronized void insert(String tableName, String row) {
-
-        checkCharacters(row);
-
+        checkLength(row);
         String[] values = row.split(",", -1);
 
         for (int i = 0; i < values.length; i++) {
             values[i] = values[i].trim();
         }
 
-        values[0] = parseId(values[0]);
+        long id = id(values[0]);
+        values[0] = Long.toString(id);
 
-        if (table(tableName).find(values[0]) != null) {
-            throw new DatabaseException("Duplicate id: " + values[0]);
+        if (table(name).putIfAbsent(id, values) != null) {
+            throw new IllegalArgumentException("Duplicate id: " + id);
         }
-
-        commit("INSERT", tableName, String.join(",", values));
+        return Result.success();
     }
 
-    public synchronized void update(
-            String tableName, String id, int column, String value) {
+    private Result update(String name, String rowId, int column, String value) {
 
-        checkCharacters(value);
-
-        if (value.contains(",")) {
-            throw new DatabaseException("A value cannot contain ','");
-        }
-
-        Row row = existingRow(tableName, parseId(id));
+        String[] values = row(table(name), id(rowId));
 
         if (column == 0) {
-            throw new DatabaseException("The id column cannot be changed");
+            throw new IllegalArgumentException("The id column cannot be changed");
+        }
+        if (column < 0 || column >= values.length) {
+            throw new IllegalArgumentException("Column index out of range");
+        }
+        if (value.contains(",")) {
+            throw new IllegalArgumentException("A value cannot contain ','");
         }
 
-        if (column < 0 || column >= row.getValues().size()) {
-            throw new DatabaseException("Column index out of range");
-        }
-
-        commit("UPDATE", tableName, parseId(id),
-                Integer.toString(column), value.trim());
+        String[] changed = values.clone();
+        changed[column] = value.trim();
+        checkLength(String.join(",", changed));
+        table(name).put(id(rowId), changed);
+        return Result.success();
     }
 
-    public synchronized void delete(String tableName, String id) {
+    public byte[] snapshot() {
 
-        existingRow(tableName, parseId(id));
-        commit("DELETE", tableName, parseId(id));
-    }
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
 
-    /** Rows as comma-separated strings, copied so callers cannot change them. */
-    public synchronized List<String> select(String tableName) {
+        try (DataOutputStream out = new DataOutputStream(bytes)) {
+            out.writeInt(tables.size());
 
-        List<String> result = new ArrayList<>();
+            for (var table : tables.entrySet()) {
+                out.writeUTF(table.getKey());
+                out.writeInt(table.getValue().size());
 
-        for (Row row : table(tableName).getRows()) {
-            result.add(String.join(",", row.getValues()));
-        }
-
-        return result;
-    }
-
-    public synchronized List<String> tableNames() {
-        return new ArrayList<>(tables.keySet());
-    }
-
-    public synchronized int rowCount() {
-        return tables.values().stream().mapToInt(t -> t.getRows().size()).sum();
-    }
-
-    @Override
-    public synchronized void close() throws IOException {
-        log.close();
-    }
-
-    private void commit(String... fields) {
-
-        try {
-            log.append(String.join("|", fields));
-        } catch (IOException e) {
-            throw new DatabaseException("Could not write log: " + e.getMessage());
-        }
-
-        apply(fields);
-    }
-
-    private void apply(String[] f) {
-
-        switch (f[0]) {
-            case "CREATE" -> tables.put(f[1], new Table());
-            case "DROP" -> tables.remove(f[1]);
-            case "INSERT" -> {
-                Row row = new Row();
-
-                for (String value : f[2].split(",", -1)) {
-                    row.addValue(value);
+                for (String[] values : table.getValue().values()) {
+                    out.writeUTF(String.join(",", values));
                 }
-
-                table(f[1]).addRow(row);
             }
-            case "UPDATE" -> existingRow(f[1], f[2])
-                    .getValues().set(Integer.parseInt(f[3]), f[4]);
-            case "DELETE" -> table(f[1]).getRows().remove(existingRow(f[1], f[2]));
-            default -> throw new DatabaseException("Unknown record: " + f[0]);
+
+            out.writeInt(sessions.size());
+
+            for (var session : sessions.entrySet()) {
+                out.writeUTF(session.getKey());
+                out.writeLong(session.getValue().sequence());
+                session.getValue().result().write(out);
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+
+        return bytes.toByteArray();
+    }
+
+    public void restore(byte[] snapshot) {
+
+        tables.clear();
+        sessions.clear();
+
+        try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(snapshot))) {
+            for (int t = in.readInt(); t > 0; t--) {
+                String name = in.readUTF();
+                Map<Long, String[]> table = new LinkedHashMap<>();
+                tables.put(name, table);
+
+                for (int r = in.readInt(); r > 0; r--) {
+                    String[] values = in.readUTF().split(",", -1);
+                    table.put(Long.parseLong(values[0]), values);
+                }
+            }
+
+            for (int s = in.readInt(); s > 0; s--) {
+                sessions.put(in.readUTF(), new Session(in.readLong(), Result.read(in)));
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
         }
     }
 
-    private Table table(String name) {
-
-        Table table = tables.get(name);
-
+    private Map<Long, String[]> table(String name) {
+        Map<Long, String[]> table = tables.get(name);
         if (table == null) {
-            throw new DatabaseException("Table not found: " + name);
+            throw new IllegalArgumentException("Table not found: " + name);
         }
-
         return table;
     }
 
-    private Row existingRow(String tableName, String id) {
-
-        Row row = table(tableName).find(id);
-
-        if (row == null) {
-            throw new DatabaseException("Row not found: " + id);
+    private static String[] row(Map<Long, String[]> table, long id) {
+        String[] values = table.get(id);
+        if (values == null) {
+            throw new IllegalArgumentException("Row not found: " + id);
         }
-
-        return row;
+        return values;
     }
 
-    private static String parseId(String id) {
-
+    private static long id(String text) {
         try {
-            return Long.toString(Long.parseLong(id.trim()));
+            return Long.parseLong(text.trim());
         } catch (NumberFormatException e) {
-            throw new DatabaseException("The id must be a whole number: " + id);
+            throw new IllegalArgumentException("The id must be a whole number: " + text);
         }
     }
 
-    // These characters separate fields and rows in the log and wire formats.
-    private static void checkCharacters(String text) {
-
-        if (text.matches("(?s).*[|;\\r\\n].*")) {
-            throw new DatabaseException(
-                    "Values cannot contain '|', ';' or line breaks");
+    private static void checkLength(String row) {
+        if (row.length() > MAX_ROW_LENGTH) {
+            throw new IllegalArgumentException("Row is too long");
         }
     }
 }

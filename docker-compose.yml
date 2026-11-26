@@ -1,0 +1,26 @@
+x-node: &node
+  build: .
+  image: novadb
+
+services:
+  node1:
+    <<: *node
+    command: ["node", "cluster.docker.properties", "1", "/data"]
+    volumes: ["data1:/data"]
+  node2:
+    <<: *node
+    command: ["node", "cluster.docker.properties", "2", "/data"]
+    volumes: ["data2:/data"]
+  node3:
+    <<: *node
+    command: ["node", "cluster.docker.properties", "3", "/data"]
+    volumes: ["data3:/data"]
+  cli:
+    <<: *node
+    command: ["cli", "cluster.docker.properties"]
+    profiles: ["tools"]
+
+volumes:
+  data1:
+  data2:
+  data3:
