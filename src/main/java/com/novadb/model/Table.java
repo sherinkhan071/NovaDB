@@ -1,18 +1,11 @@
 package com.novadb.model;
 
-import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
 
-public class Table implements Serializable {
+public class Table {
 
-    private static final long serialVersionUID = 1L;
-
-    private List<Row> rows;
-
-    public Table() {
-        rows = new ArrayList<>();
-    }
+    private final List<Row> rows = new ArrayList<>();
 
     public void addRow(Row row) {
         rows.add(row);
@@ -20,5 +13,17 @@ public class Table implements Serializable {
 
     public List<Row> getRows() {
         return rows;
+    }
+
+    /** The row whose first value equals the id, or null. */
+    public Row find(String id) {
+
+        for (Row row : rows) {
+            if (row.getValues().get(0).equals(id)) {
+                return row;
+            }
+        }
+
+        return null;
     }
 }

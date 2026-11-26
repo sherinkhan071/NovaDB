@@ -1,714 +1,214 @@
-
 package com.novadb.engine;
 
-import java.util.HashMap;
+import java.io.Closeable;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
+import java.util.regex.Pattern;
 
 import com.novadb.model.Row;
 import com.novadb.model.Table;
 
-public class Database {
+/**
+ * Every change follows the same three steps: validate, append to the log,
+ * apply to memory. Recovery runs the "apply" step on each logged record.
+ */
+public class Database implements Closeable {
 
-    private Map<String, Table> tables;
-    private String fileName;
+    private static final Pattern TABLE_NAME = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
 
-    public Database() {
+    private final Map<String, Table> tables = new TreeMap<>();
+    private final WriteAheadLog log;
 
-        tables = new HashMap<>();
+    public Database(Path logFile) {
 
-        fileName = "novadb.data";
-
-        FileManager.load(tables, fileName);
-    }
-
-    public Database(String fileName) {
-
-        tables = new HashMap<>();
-
-        this.fileName = fileName;
-
-        FileManager.load(tables, fileName);
-    }
-
-    // -----------------------------------------
-    // NORMAL EXECUTE
-    // -----------------------------------------
-
-    public synchronized void execute(String command) {
-
-        execute(command, false);
-    }
-
-    // -----------------------------------------
-    // SILENT EXECUTE
-    // Used by WAL recovery
-    // -----------------------------------------
-
-    public synchronized void execute(
-            String command,
-            boolean silent) {
-
-        command = command.trim();
-
-        // CREATE TABLE
-        if (command.toLowerCase()
-                .startsWith("create table")) {
-
-            String tableName =
-                    command.substring(13).trim();
-
-            createTable(
-                    tableName,
-                    silent
-            );
+        try {
+            log = new WriteAheadLog(logFile);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Cannot open " + logFile, e);
         }
 
-        // INSERT INTO
-        else if (command.toLowerCase()
-                .startsWith("insert into")) {
+        int line = 0;
 
-            String[] parts =
-                    command.split("\\s+", 4);
+        for (String record : log.recoveredRecords()) {
+            line++;
 
-            if (parts.length < 4) {
+            try {
+                apply(record.split("\\|", -1));
+            } catch (RuntimeException e) {
+                // Refuse to start rather than run with silently missing data.
+                throw new DatabaseException(
+                        "Corrupt log " + logFile + " at line " + line);
+            }
+        }
+    }
 
-                if (!silent) {
-                    System.out.println(
-                            "Invalid INSERT command."
-                    );
+    public synchronized void createTable(String name) {
+
+        if (!TABLE_NAME.matcher(name).matches()) {
+            throw new DatabaseException("Invalid table name: " + name);
+        }
+
+        if (tables.containsKey(name)) {
+            throw new DatabaseException("Table already exists: " + name);
+        }
+
+        commit("CREATE", name);
+    }
+
+    public synchronized void dropTable(String name) {
+
+        table(name);
+        commit("DROP", name);
+    }
+
+    /** @param row comma-separated values; the first is the numeric id */
+    public synchronized void insert(String tableName, String row) {
+
+        checkCharacters(row);
+
+        String[] values = row.split(",", -1);
+
+        for (int i = 0; i < values.length; i++) {
+            values[i] = values[i].trim();
+        }
+
+        values[0] = parseId(values[0]);
+
+        if (table(tableName).find(values[0]) != null) {
+            throw new DatabaseException("Duplicate id: " + values[0]);
+        }
+
+        commit("INSERT", tableName, String.join(",", values));
+    }
+
+    public synchronized void update(
+            String tableName, String id, int column, String value) {
+
+        checkCharacters(value);
+
+        if (value.contains(",")) {
+            throw new DatabaseException("A value cannot contain ','");
+        }
+
+        Row row = existingRow(tableName, parseId(id));
+
+        if (column == 0) {
+            throw new DatabaseException("The id column cannot be changed");
+        }
+
+        if (column < 0 || column >= row.getValues().size()) {
+            throw new DatabaseException("Column index out of range");
+        }
+
+        commit("UPDATE", tableName, parseId(id),
+                Integer.toString(column), value.trim());
+    }
+
+    public synchronized void delete(String tableName, String id) {
+
+        existingRow(tableName, parseId(id));
+        commit("DELETE", tableName, parseId(id));
+    }
+
+    /** Rows as comma-separated strings, copied so callers cannot change them. */
+    public synchronized List<String> select(String tableName) {
+
+        List<String> result = new ArrayList<>();
+
+        for (Row row : table(tableName).getRows()) {
+            result.add(String.join(",", row.getValues()));
+        }
+
+        return result;
+    }
+
+    public synchronized List<String> tableNames() {
+        return new ArrayList<>(tables.keySet());
+    }
+
+    public synchronized int rowCount() {
+        return tables.values().stream().mapToInt(t -> t.getRows().size()).sum();
+    }
+
+    @Override
+    public synchronized void close() throws IOException {
+        log.close();
+    }
+
+    private void commit(String... fields) {
+
+        try {
+            log.append(String.join("|", fields));
+        } catch (IOException e) {
+            throw new DatabaseException("Could not write log: " + e.getMessage());
+        }
+
+        apply(fields);
+    }
+
+    private void apply(String[] f) {
+
+        switch (f[0]) {
+            case "CREATE" -> tables.put(f[1], new Table());
+            case "DROP" -> tables.remove(f[1]);
+            case "INSERT" -> {
+                Row row = new Row();
+
+                for (String value : f[2].split(",", -1)) {
+                    row.addValue(value);
                 }
 
-                return;
+                table(f[1]).addRow(row);
             }
-
-            String tableName = parts[2];
-            String value = parts[3];
-
-            insertInto(
-                    tableName,
-                    value,
-                    silent
-            );
-        }
-
-        // SELECT * FROM
-        else if (command.toLowerCase()
-                .startsWith("select * from")) {
-
-            String remaining =
-                    command.substring(13).trim();
-
-            // SELECT WHERE
-            if (remaining.toLowerCase()
-                    .contains(" where ")) {
-
-                String[] parts =
-                        remaining.split(
-                                "(?i) where ",
-                                2
-                        );
-
-                String tableName =
-                        parts[0].trim();
-
-                String searchValue =
-                        parts[1].trim();
-
-                selectWhere(
-                        tableName,
-                        searchValue
-                );
-
-            } else {
-
-                selectAll(remaining);
-            }
-        }
-
-        // DELETE FROM
-        else if (command.toLowerCase()
-                .startsWith("delete from")) {
-
-            String[] parts =
-                    command.split("\\s+", 4);
-
-            if (parts.length < 4) {
-
-                if (!silent) {
-                    System.out.println(
-                            "Invalid DELETE command."
-                    );
-                }
-
-                return;
-            }
-
-            String tableName = parts[2];
-            String value = parts[3];
-
-            deleteRow(
-                    tableName,
-                    value,
-                    silent
-            );
-        }
-
-        // DROP TABLE
-        else if (command.toLowerCase()
-                .startsWith("drop table")) {
-
-            String tableName =
-                    command.substring(10).trim();
-
-            dropTable(
-                    tableName,
-                    silent
-            );
-        }
-
-        // UPDATE
-        else if (command.toLowerCase()
-                .startsWith("update")) {
-
-            String[] parts =
-                    command.split("\\s+", 4);
-
-            if (parts.length < 4) {
-
-                if (!silent) {
-                    System.out.println(
-                            "Invalid UPDATE command."
-                    );
-                }
-
-                return;
-            }
-
-            String tableName = parts[1];
-            String oldValue = parts[2];
-            String newValue = parts[3];
-
-            updateRow(
-                    tableName,
-                    oldValue,
-                    newValue,
-                    silent
-            );
-        }
-
-        // DESCRIBE
-        else if (command.toLowerCase()
-                .startsWith("describe")) {
-
-            String tableName =
-                    command.substring(8).trim();
-
-            describeTable(tableName);
-        }
-
-        // SAVE
-        else if (command.equalsIgnoreCase("save")) {
-
-            FileManager.save(
-                    tables,
-                    fileName
-            );
-        }
-
-        // SHOW TABLES
-        else if (command.equalsIgnoreCase(
-                "show tables")) {
-
-            showTables();
-        }
-
-        else {
-
-            if (!silent) {
-                System.out.println(
-                        "Unknown command."
-                );
-            }
+            case "UPDATE" -> existingRow(f[1], f[2])
+                    .getValues().set(Integer.parseInt(f[3]), f[4]);
+            case "DELETE" -> table(f[1]).getRows().remove(existingRow(f[1], f[2]));
+            default -> throw new DatabaseException("Unknown record: " + f[0]);
         }
     }
 
-    // -----------------------------------------
-    // CREATE TABLE
-    // -----------------------------------------
+    private Table table(String name) {
 
-    private void createTable(
-            String tableName,
-            boolean silent) {
-
-        if (tables.containsKey(tableName)) {
-
-            if (!silent) {
-                System.out.println(
-                        "Table already exists."
-                );
-            }
-
-            return;
-        }
-
-        tables.put(
-                tableName,
-                new Table()
-        );
-
-        if (!silent) {
-
-            System.out.println(
-                    "Table '" + tableName +
-                    "' created successfully."
-            );
-        }
-
-        FileManager.save(
-                tables,
-                fileName,
-                silent
-        );
-    }
-
-    // -----------------------------------------
-    // INSERT
-    // -----------------------------------------
-
-    private void insertInto(
-            String tableName,
-            String value,
-            boolean silent) {
-
-        Table table =
-                tables.get(tableName);
+        Table table = tables.get(name);
 
         if (table == null) {
-
-            if (!silent) {
-                System.out.println(
-                        "Table does not exist."
-                );
-            }
-
-            return;
+            throw new DatabaseException("Table not found: " + name);
         }
 
-        Row row = new Row();
-
-        String[] values =
-                value.split(",");
-
-        for (String v : values) {
-
-            row.addValue(
-                    v.trim()
-            );
-        }
-
-        table.addRow(row);
-
-        if (!silent) {
-
-            System.out.println(
-                    "Row inserted successfully."
-            );
-        }
-
-        FileManager.save(
-                tables,
-                fileName,
-                silent
-        );
+        return table;
     }
 
-    // -----------------------------------------
-    // SELECT ALL
-    // -----------------------------------------
+    private Row existingRow(String tableName, String id) {
 
-    private void selectAll(
-            String tableName) {
+        Row row = table(tableName).find(id);
 
-        Table table =
-                tables.get(tableName);
-
-        if (table == null) {
-
-            System.out.println(
-                    "Table not found."
-            );
-
-            return;
+        if (row == null) {
+            throw new DatabaseException("Row not found: " + id);
         }
 
-        if (table.getRows().isEmpty()) {
+        return row;
+    }
 
-            System.out.println(
-                    "Table is empty."
-            );
+    private static String parseId(String id) {
 
-            return;
-        }
-
-        System.out.println("Rows:");
-
-        for (Row row :
-                table.getRows()) {
-
-            for (String value :
-                    row.getValues()) {
-
-                System.out.print(
-                        value + " "
-                );
-            }
-
-            System.out.println();
+        try {
+            return Long.toString(Long.parseLong(id.trim()));
+        } catch (NumberFormatException e) {
+            throw new DatabaseException("The id must be a whole number: " + id);
         }
     }
 
-    // -----------------------------------------
-    // SELECT WHERE
-    // -----------------------------------------
+    // These characters separate fields and rows in the log and wire formats.
+    private static void checkCharacters(String text) {
 
-    private void selectWhere(
-            String tableName,
-            String searchValue) {
-
-        Table table =
-                tables.get(tableName);
-
-        if (table == null) {
-
-            System.out.println(
-                    "Table not found."
-            );
-
-            return;
+        if (text.matches("(?s).*[|;\\r\\n].*")) {
+            throw new DatabaseException(
+                    "Values cannot contain '|', ';' or line breaks");
         }
-
-        if (table.getRows().isEmpty()) {
-
-            System.out.println(
-                    "Table is empty."
-            );
-
-            return;
-        }
-
-        boolean found = false;
-
-        System.out.println(
-                "Matching Rows:"
-        );
-
-        for (Row row :
-                table.getRows()) {
-
-            if (row.getValues()
-                    .contains(searchValue)) {
-
-                found = true;
-
-                for (String value :
-                        row.getValues()) {
-
-                    System.out.print(
-                            value + " "
-                    );
-                }
-
-                System.out.println();
-            }
-        }
-
-        if (!found) {
-
-            System.out.println(
-                    "No matching rows found."
-            );
-        }
-    }
-
-    // -----------------------------------------
-    // DELETE
-    // -----------------------------------------
-
-    private void deleteRow(
-            String tableName,
-            String value,
-            boolean silent) {
-
-        Table table =
-                tables.get(tableName);
-
-        if (table == null) {
-
-            if (!silent) {
-                System.out.println(
-                        "Table not found."
-                );
-            }
-
-            return;
-        }
-
-        boolean removed =
-                table.getRows()
-                        .removeIf(
-                                row ->
-                                        row.getValues()
-                                                .contains(value)
-                        );
-
-        if (removed) {
-
-            if (!silent) {
-
-                System.out.println(
-                        "Row deleted successfully."
-                );
-            }
-
-            FileManager.save(
-                    tables,
-                    fileName,
-                    silent
-            );
-
-        } else {
-
-            if (!silent) {
-
-                System.out.println(
-                        "Row not found."
-                );
-            }
-        }
-    }
-
-    // -----------------------------------------
-    // UPDATE
-    // -----------------------------------------
-
-    private void updateRow(
-            String tableName,
-            String oldValue,
-            String newValue,
-            boolean silent) {
-
-        Table table =
-                tables.get(tableName);
-
-        if (table == null) {
-
-            if (!silent) {
-
-                System.out.println(
-                        "Table not found."
-                );
-            }
-
-            return;
-        }
-
-        for (Row row :
-                table.getRows()) {
-
-            for (int i = 0;
-                 i < row.getValues().size();
-                 i++) {
-
-                if (row.getValues()
-                        .get(i)
-                        .equals(oldValue)) {
-
-                    row.getValues()
-                            .set(
-                                    i,
-                                    newValue
-                            );
-
-                    if (!silent) {
-
-                        System.out.println(
-                                "Row updated successfully."
-                        );
-                    }
-
-                    FileManager.save(
-                            tables,
-                            fileName,
-                            silent
-                    );
-
-                    return;
-                }
-            }
-        }
-
-        if (!silent) {
-
-            System.out.println(
-                    "Value not found."
-            );
-        }
-    }
-
-    // -----------------------------------------
-    // DROP TABLE
-    // -----------------------------------------
-
-    private void dropTable(
-            String tableName,
-            boolean silent) {
-
-        if (!tables.containsKey(
-                tableName)) {
-
-            if (!silent) {
-
-                System.out.println(
-                        "Table not found."
-                );
-            }
-
-            return;
-        }
-
-        tables.remove(tableName);
-
-        if (!silent) {
-
-            System.out.println(
-                    "Table '" + tableName +
-                    "' dropped successfully."
-            );
-        }
-
-        FileManager.save(
-                tables,
-                fileName,
-                silent
-        );
-    }
-
-    // -----------------------------------------
-    // SHOW TABLES
-    // -----------------------------------------
-
-    private void showTables() {
-
-        if (tables.isEmpty()) {
-
-            System.out.println(
-                    "No tables found."
-            );
-
-            return;
-        }
-
-        System.out.println("Tables:");
-
-        for (String tableName :
-                tables.keySet()) {
-
-            System.out.println(
-                    "- " + tableName
-            );
-        }
-    }
-
-    // -----------------------------------------
-    // DESCRIBE
-    // -----------------------------------------
-
-    private void describeTable(
-            String tableName) {
-
-        Table table =
-                tables.get(tableName);
-
-        if (table == null) {
-
-            System.out.println(
-                    "Table not found."
-            );
-
-            return;
-        }
-
-        System.out.println(
-                "Table Name : "
-                        + tableName
-        );
-
-        System.out.println(
-                "Total Rows : "
-                        + table.getRows().size()
-        );
-
-        if (!table.getRows().isEmpty()) {
-
-            System.out.println(
-                    "Columns    : "
-                            + table.getRows()
-                            .get(0)
-                            .getValues()
-                            .size()
-            );
-
-        } else {
-
-            System.out.println(
-                    "Columns    : 0"
-            );
-        }
-    }
-
-    // -----------------------------------------
-    // GET TABLE
-    // -----------------------------------------
-
-    public synchronized Table getTable(
-            String tableName) {
-
-        return tables.get(tableName);
-    }
-
-    // -----------------------------------------
-    // GET ALL TABLES
-    // Used by Node / distributed SHOW TABLES
-    // -----------------------------------------
-
-    public synchronized Map<String, Table> getTables() {
-
-        return tables;
-    }
-
-    // -----------------------------------------
-    // SAVE DATABASE
-    // -----------------------------------------
-
-    public synchronized void saveDatabase() {
-
-        FileManager.save(
-                tables,
-                fileName
-        );
-    }
-
-    // -----------------------------------------
-    // SILENT SAVE DATABASE
-    // -----------------------------------------
-
-    public synchronized void saveDatabase(
-            boolean silent) {
-
-        FileManager.save(
-                tables,
-                fileName,
-                silent
-        );
     }
 }

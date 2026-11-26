@@ -1,600 +1,211 @@
-
 package com.novadb.cli;
 
+import java.util.Arrays;
+import java.util.List;
 import java.util.Scanner;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
+import com.novadb.node.Node;
 import com.novadb.node.NodeManager;
+import com.novadb.node.Reply;
 
 public class Console {
 
-    private final NodeManager nodeManager;
+    private static final List<String> COLUMNS = List.of("id", "name", "age", "city");
 
-    public Console(NodeManager nodeManager) {
-        this.nodeManager = nodeManager;
+    private static final Pattern CREATE = command("create\\s+table\\s+(\\S+)");
+    private static final Pattern DROP = command("drop\\s+table\\s+(\\S+)");
+    private static final Pattern INSERT = command("insert\\s+into\\s+(\\S+)\\s+(.+)");
+    private static final Pattern SELECT = command("select\\s+\\*\\s+from\\s+(\\S+)");
+    private static final Pattern DELETE = command(
+            "delete\\s+from\\s+(\\S+)\\s+where\\s+id\\s*=\\s*(\\S+)");
+    private static final Pattern UPDATE = command(
+            "update\\s+(\\S+)\\s+set\\s+(\\w+)\\s*=\\s*(.+?)\\s+where\\s+id\\s*=\\s*(\\S+)");
+
+    private final NodeManager cluster;
+
+    public Console(NodeManager cluster) {
+        this.cluster = cluster;
     }
 
     public void start() {
 
         Scanner scanner = new Scanner(System.in);
-
-        printWelcome();
+        System.out.println("Type 'help' for commands.");
 
         while (true) {
-
             System.out.print("novadb> ");
 
-            String command = scanner.nextLine().trim();
-
-            if (command.isEmpty()) {
-                continue;
+            if (!scanner.hasNextLine()) {
+                break;
             }
 
-            // -----------------------------------------
-            // EXIT
-            // -----------------------------------------
+            String line = scanner.nextLine().trim();
 
-            if (command.equalsIgnoreCase("exit")) {
-
+            if (line.equalsIgnoreCase("exit")) {
                 System.out.println("Bye.");
                 break;
             }
 
-            // -----------------------------------------
-            // HELP
-            // -----------------------------------------
-
-            if (command.equalsIgnoreCase("help")) {
-
-                printHelp();
-                continue;
+            if (!line.isEmpty()) {
+                execute(line);
             }
-
-            // -----------------------------------------
-            // CREATE TABLE
-            // -----------------------------------------
-
-            if (command.toLowerCase().startsWith("create table")) {
-
-                String tableName =
-                        command.substring(12).trim();
-
-                if (tableName.isEmpty()) {
-
-                    error("Table name is required.");
-                    continue;
-                }
-
-                nodeManager.createTable(tableName);
-                continue;
-            }
-
-            // -----------------------------------------
-            // DROP TABLE
-            // -----------------------------------------
-
-            if (command.toLowerCase().startsWith("drop table")) {
-
-                String tableName =
-                        command.substring(10).trim();
-
-                if (tableName.isEmpty()) {
-
-                    error("Table name is required.");
-                    continue;
-                }
-
-                nodeManager.dropTable(tableName);
-                continue;
-            }
-
-            // -----------------------------------------
-            // INSERT
-            // -----------------------------------------
-
-            if (command.toLowerCase().startsWith("insert into")) {
-
-                handleInsert(command);
-                continue;
-            }
-
-            // -----------------------------------------
-            // SELECT
-            // -----------------------------------------
-
-            if (command.toLowerCase().startsWith("select * from")) {
-
-                handleSelect(command);
-                continue;
-            }
-
-            // -----------------------------------------
-            // DELETE
-            // -----------------------------------------
-
-            if (command.toLowerCase().startsWith("delete from")) {
-
-                handleDelete(command);
-                continue;
-            }
-
-            // -----------------------------------------
-            // UPDATE
-            // -----------------------------------------
-
-            if (command.toLowerCase().startsWith("update")) {
-
-                handleUpdate(command);
-                continue;
-            }
-
-            // -----------------------------------------
-            // SHOW TABLES
-            // -----------------------------------------
-
-            if (command.equalsIgnoreCase("show tables")) {
-
-                nodeManager.showTables();
-                continue;
-            }
-
-            // -----------------------------------------
-            // HEALTH
-            // -----------------------------------------
-
-            if (command.equalsIgnoreCase("health")) {
-
-                nodeManager.checkNodeHealth();
-                continue;
-            }
-
-            // -----------------------------------------
-            // STATS
-            // -----------------------------------------
-
-            if (command.equalsIgnoreCase("stats")) {
-
-                nodeManager.showStats();
-                continue;
-            }
-
-            // -----------------------------------------
-            // BENCHMARK
-            // -----------------------------------------
-
-            if (command.equalsIgnoreCase("benchmark")) {
-
-                nodeManager.benchmark();
-                continue;
-            }
-
-            // -----------------------------------------
-            // FAILOVER
-            // -----------------------------------------
-
-            if (command.equalsIgnoreCase("failover")) {
-
-                nodeManager.testFailover();
-                continue;
-            }
-
-            // -----------------------------------------
-            // UNKNOWN COMMAND
-            // -----------------------------------------
-
-            error(
-                    "Unknown command. Type 'help' for available commands."
-            );
-        }
-
-        scanner.close();
-    }
-
-    // -----------------------------------------
-    // WELCOME
-    // -----------------------------------------
-
-    private void printWelcome() {
-
-        System.out.println();
-        System.out.println("NovaDB");
-        System.out.println("Distributed Database System");
-        System.out.println("Type 'help' for commands.");
-        System.out.println();
-    }
-
-    // -----------------------------------------
-    // HELP
-    // -----------------------------------------
-
-    private void printHelp() {
-
-        System.out.println();
-        System.out.println("Commands");
-        System.out.println("----------------------------------------");
-
-        System.out.println(
-                "CREATE TABLE <name>"
-        );
-
-        System.out.println(
-                "DROP TABLE <name>"
-        );
-
-        System.out.println(
-                "INSERT INTO <table> <values>"
-        );
-
-        System.out.println(
-                "SELECT * FROM <table>"
-        );
-
-        System.out.println(
-                "UPDATE <table> SET <column> = <value> WHERE id = <id>"
-        );
-
-        System.out.println(
-                "DELETE FROM <table> WHERE id = <id>"
-        );
-
-        System.out.println(
-                "SHOW TABLES"
-        );
-
-        System.out.println(
-                "HEALTH"
-        );
-
-        System.out.println(
-                "STATS"
-        );
-
-        System.out.println(
-                "BENCHMARK"
-        );
-
-        System.out.println(
-                "FAILOVER"
-        );
-
-        System.out.println(
-                "HELP"
-        );
-
-        System.out.println(
-                "EXIT"
-        );
-
-        System.out.println("----------------------------------------");
-        System.out.println();
-    }
-
-    // -----------------------------------------
-    // INSERT
-    // -----------------------------------------
-
-    private void handleInsert(String command) {
-
-        try {
-
-            String lowerCommand =
-                    command.toLowerCase();
-
-            int intoIndex =
-                    lowerCommand.indexOf("into");
-
-            String remaining =
-                    command.substring(
-                            intoIndex + 4
-                    ).trim();
-
-            String[] parts =
-                    remaining.split("\\s+", 2);
-
-            if (parts.length < 2) {
-
-                error("Invalid INSERT syntax.");
-
-                System.out.println(
-                        "Usage: INSERT INTO students 7,Grace,22,Delhi"
-                );
-
-                return;
-            }
-
-            String tableName =
-                    parts[0];
-
-            String values =
-                    parts[1];
-
-            nodeManager.insertWithSharding(
-                    tableName,
-                    values
-            );
-
-        } catch (Exception e) {
-
-            error(
-                    "INSERT failed: "
-                            + e.getMessage()
-            );
         }
     }
 
-    // -----------------------------------------
-    // SELECT
-    // -----------------------------------------
-
-    private void handleSelect(String command) {
-
-        try {
-
-            String lowerCommand =
-                    command.toLowerCase();
-
-            String prefix =
-                    "select * from";
-
-            int prefixIndex =
-                    lowerCommand.indexOf(prefix);
-
-            String tableName =
-                    command.substring(
-                            prefixIndex + prefix.length()
-                    ).trim();
-
-            if (tableName.isEmpty()) {
-
-                error("Table name is required.");
-                return;
-            }
-
-            nodeManager.distributedSelect(
-                    tableName
-            );
-
-        } catch (Exception e) {
-
-            error(
-                    "SELECT failed: "
-                            + e.getMessage()
-            );
-        }
-    }
-
-    // -----------------------------------------
-    // DELETE
-    // -----------------------------------------
-
-    private void handleDelete(String command) {
-
-        try {
-
-            String lowerCommand =
-                    command.toLowerCase();
-
-            int fromIndex =
-                    lowerCommand.indexOf("from");
-
-            String remaining =
-                    command.substring(
-                            fromIndex + 4
-                    ).trim();
-
-            String[] parts =
-                    remaining.split(
-                            "(?i)\\s+where\\s+",
-                            2
-                    );
-
-            if (parts.length < 2) {
-
-                error("Invalid DELETE syntax.");
-
-                System.out.println(
-                        "Usage: DELETE FROM students WHERE id = 7"
-                );
-
-                return;
-            }
-
-            String tableName =
-                    parts[0].trim();
-
-            String condition =
-                    parts[1].trim();
-
-            String[] conditionParts =
-                    condition.split(
-                            "\\s*=\\s*",
-                            2
-                    );
-
-            if (conditionParts.length < 2) {
-
-                error("Invalid DELETE condition.");
-
-                System.out.println(
-                        "Use: WHERE id = 7"
-                );
-
-                return;
-            }
-
-            String column =
-                    conditionParts[0].trim();
-
-            String id =
-                    conditionParts[1].trim();
-
-            if (!column.equalsIgnoreCase("id")) {
-
-                error(
-                        "Distributed DELETE requires the ID column."
-                );
-
-                return;
-            }
-
-            nodeManager.deleteWithSharding(
-                    tableName,
-                    id
-            );
-
-        } catch (Exception e) {
-
-            error(
-                    "DELETE failed: "
-                            + e.getMessage()
-            );
-        }
-    }
-
-    // -----------------------------------------
-    // UPDATE
-    // -----------------------------------------
-
-    private void handleUpdate(String command) {
-
-        try {
-
-            String lowerCommand =
-                    command.toLowerCase();
-
-            int updateIndex =
-                    lowerCommand.indexOf("update");
-
-            int setIndex =
-                    lowerCommand.indexOf("set");
-
-            int whereIndex =
-                    lowerCommand.indexOf("where");
-
-            if (setIndex == -1
-                    || whereIndex == -1) {
-
-                error("Invalid UPDATE syntax.");
-
-                System.out.println(
-                        "Usage: UPDATE students SET name = Daniel WHERE id = 4"
-                );
-
-                return;
-            }
-
-            String tableName =
-                    command.substring(
-                            updateIndex + 6,
-                            setIndex
-                    ).trim();
-
-            String setPart =
-                    command.substring(
-                            setIndex + 3,
-                            whereIndex
-                    ).trim();
-
-            String wherePart =
-                    command.substring(
-                            whereIndex + 5
-                    ).trim();
-
-            String[] setParts =
-                    setPart.split(
-                            "\\s*=\\s*",
-                            2
-                    );
-
-            String[] whereParts =
-                    wherePart.split(
-                            "\\s*=\\s*",
-                            2
-                    );
-
-            if (setParts.length < 2
-                    || whereParts.length < 2) {
-
-                error("Invalid UPDATE syntax.");
-
-                System.out.println(
-                        "Usage: UPDATE students SET name = Daniel WHERE id = 4"
-                );
-
-                return;
-            }
-
-            String column =
-                    setParts[0].trim();
-
-            String newValue =
-                    setParts[1].trim();
-
-            String whereColumn =
-                    whereParts[0].trim();
-
-            String id =
-                    whereParts[1].trim();
-
-            if (!whereColumn.equalsIgnoreCase("id")) {
-
-                error(
-                        "Distributed UPDATE requires the ID column."
-                );
-
-                return;
-            }
-
-            int columnIndex;
-
-            if (column.equalsIgnoreCase("id")) {
-
-                columnIndex = 0;
-
-            } else if (column.equalsIgnoreCase("name")) {
-
-                columnIndex = 1;
-
-            } else if (column.equalsIgnoreCase("age")) {
-
-                columnIndex = 2;
-
-            } else if (column.equalsIgnoreCase("city")) {
-
-                columnIndex = 3;
-
+    public void execute(String line) {
+
+        Matcher m;
+
+        if ((m = CREATE.matcher(line)).matches()) {
+            print(cluster.createTable(m.group(1)));
+        } else if ((m = DROP.matcher(line)).matches()) {
+            print(cluster.dropTable(m.group(1)));
+        } else if ((m = INSERT.matcher(line)).matches()) {
+            print(cluster.insert(m.group(1), m.group(2)));
+        } else if ((m = SELECT.matcher(line)).matches()) {
+            select(m.group(1));
+        } else if ((m = DELETE.matcher(line)).matches()) {
+            print(cluster.delete(m.group(1), m.group(2)));
+        } else if ((m = UPDATE.matcher(line)).matches()) {
+            int column = COLUMNS.indexOf(m.group(2).toLowerCase());
+
+            if (column < 0) {
+                System.out.println("Error: Unknown column: " + m.group(2));
             } else {
-
-                error(
-                        "Unknown column: " + column
-                );
-
-                return;
+                print(cluster.update(m.group(1), m.group(4), column, m.group(3)));
             }
-
-            nodeManager.updateWithSharding(
-                    tableName,
-                    id,
-                    columnIndex,
-                    newValue
-            );
-
-        } catch (Exception e) {
-
-            error(
-                    "UPDATE failed: "
-                            + e.getMessage()
-            );
+        } else {
+            switch (line.toLowerCase()) {
+                case "show tables" -> showTables();
+                case "health" -> health();
+                case "stats" -> stats();
+                case "benchmark" -> benchmark();
+                case "help" -> help();
+                default -> System.out.println(
+                        "Error: Unknown or incomplete command. Type 'help'.");
+            }
         }
     }
 
-    // -----------------------------------------
-    // ERROR
-    // -----------------------------------------
+    private void select(String table) {
 
-    private void error(String message) {
+        Reply reply = cluster.select(table);
 
-        System.out.println(
-                "Error: " + message
-        );
+        if (!reply.ok()) {
+            print(reply);
+            return;
+        }
+
+        String[] rows = reply.body().isEmpty()
+                ? new String[0] : reply.body().split(";");
+
+        for (String row : rows) {
+            System.out.println(row);
+        }
+
+        System.out.println("Total rows: " + rows.length);
+    }
+
+    private void showTables() {
+
+        Reply reply = cluster.showTables();
+
+        if (!reply.ok()) {
+            print(reply);
+        } else if (reply.body().isEmpty()) {
+            System.out.println("No tables found.");
+        } else {
+            for (String table : reply.body().split(",")) {
+                System.out.println("- " + table);
+            }
+        }
+    }
+
+    private void health() {
+
+        for (Node node : cluster.getNodes()) {
+            System.out.println(node.getNodeId() + " : "
+                    + (cluster.health(node).ok() ? "ONLINE" : "OFFLINE"));
+        }
+    }
+
+    private void stats() {
+
+        for (Node node : cluster.getNodes()) {
+            Reply reply = cluster.stats(node);
+
+            if (reply.ok()) {
+                String[] values = reply.body().split("\\|");
+                System.out.println(node.getNodeId() + " : rows=" + values[0]
+                        + " requests=" + values[1]);
+            } else {
+                System.out.println(node.getNodeId() + " : OFFLINE");
+            }
+        }
+    }
+
+    /** Sequential replicated inserts: one client, no concurrency. */
+    private void benchmark() {
+
+        String table = "bench_" + System.currentTimeMillis();
+
+        if (!cluster.createTable(table).ok()) {
+            System.out.println("Error: Could not create the benchmark table.");
+            return;
+        }
+
+        int operations = 500;
+        long[] latencies = new long[operations];
+        long start = System.nanoTime();
+
+        for (int i = 0; i < operations; i++) {
+            long before = System.nanoTime();
+            Reply reply = cluster.insert(table, i + ",Bench,22,Delhi");
+            latencies[i] = System.nanoTime() - before;
+
+            if (!reply.ok()) {
+                print(reply);
+                return;
+            }
+        }
+
+        double seconds = (System.nanoTime() - start) / 1e9;
+        Arrays.sort(latencies);
+
+        System.out.printf("Replicated inserts : %d (1 client)%n", operations);
+        System.out.printf("Throughput         : %.0f writes/sec%n", operations / seconds);
+        System.out.printf("Latency p50        : %.2f ms%n",
+                latencies[operations / 2] / 1e6);
+        System.out.printf("Latency p99        : %.2f ms%n",
+                latencies[operations * 99 / 100 - 1] / 1e6);
+
+        cluster.dropTable(table);
+    }
+
+    private void help() {
+
+        System.out.println("""
+                CREATE TABLE <name>
+                DROP TABLE <name>
+                INSERT INTO <table> <id>,<name>,<age>,<city>
+                SELECT * FROM <table>
+                UPDATE <table> SET <column> = <value> WHERE id = <id>
+                DELETE FROM <table> WHERE id = <id>
+                SHOW TABLES
+                HEALTH
+                STATS
+                BENCHMARK
+                HELP
+                EXIT""");
+    }
+
+    private static void print(Reply reply) {
+        System.out.println((reply.ok() ? "OK: " : "Error: ") + reply.body());
+    }
+
+    private static Pattern command(String regex) {
+        return Pattern.compile(regex, Pattern.CASE_INSENSITIVE);
     }
 }

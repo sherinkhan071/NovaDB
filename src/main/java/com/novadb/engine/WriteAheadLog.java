@@ -1,327 +1,77 @@
 package com.novadb.engine;
 
-import java.io.*;
+import java.io.Closeable;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
+import java.util.List;
 
-import com.novadb.model.Table;
-import com.novadb.model.Row;
+/**
+ * Append-only log with one record per line. It is the only copy of the data on
+ * disk: the tables in memory are rebuilt by replaying it in order.
+ */
+public class WriteAheadLog implements Closeable {
 
-public class WriteAheadLog {
+    private final FileChannel channel;
+    private final List<String> recovered = new ArrayList<>();
 
-    private String fileName;
+    public WriteAheadLog(Path file) throws IOException {
 
-    public WriteAheadLog(String nodeId) {
+        channel = FileChannel.open(file,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.READ,
+                StandardOpenOption.WRITE);
 
-        fileName =
-                "novadb-"
-                        + nodeId.toLowerCase()
-                        + ".wal";
+        byte[] bytes = Files.readAllBytes(file);
+
+        // A record counts only once its newline is on disk. Anything after the
+        // last newline is a write that was cut off, so it is discarded.
+        int end = 0;
+
+        for (int i = 0; i < bytes.length; i++) {
+            if (bytes[i] == '\n') {
+                recovered.add(new String(bytes, end, i - end, StandardCharsets.UTF_8));
+                end = i + 1;
+            }
+        }
+
+        channel.truncate(end);
+        channel.position(end);
     }
 
-    // -----------------------------------------
-    // WRITE TO WAL
-    // -----------------------------------------
+    /** Records that were on disk when the log was opened. */
+    public List<String> recoveredRecords() {
+        return recovered;
+    }
 
-    public synchronized void log(
-            String operation,
-            String data) {
+    /** Returns only after the record has been forced to disk. */
+    public synchronized void append(String record) throws IOException {
 
-        try (
-                FileWriter fileWriter =
-                        new FileWriter(
-                                fileName,
-                                true
-                        );
+        long start = channel.position();
 
-                PrintWriter writer =
-                        new PrintWriter(fileWriter)
-        ) {
+        try {
+            ByteBuffer buffer = ByteBuffer.wrap(
+                    (record + "\n").getBytes(StandardCharsets.UTF_8));
 
-            writer.println(
-                    operation + "|" + data
-            );
+            while (buffer.hasRemaining()) {
+                channel.write(buffer);
+            }
 
-            writer.flush();
+            channel.force(false);
 
         } catch (IOException e) {
-
-            System.out.println(
-                    "WAL error: "
-                            + e.getMessage()
-            );
+            channel.truncate(start);
+            throw e;
         }
     }
 
-    // -----------------------------------------
-    // WAL RECOVERY
-    // -----------------------------------------
-
-    public void recover(Database database) {
-
-        File file =
-                new File(fileName);
-
-        if (!file.exists()) {
-            return;
-        }
-
-        boolean recovered = false;
-
-        try (
-                BufferedReader reader =
-                        new BufferedReader(
-                                new FileReader(file)
-                        )
-        ) {
-
-            String line;
-
-            while ((line = reader.readLine()) != null) {
-
-                if (line.trim().isEmpty()) {
-                    continue;
-                }
-
-                String[] parts =
-                        line.split("\\|", 2);
-
-                if (parts.length < 2) {
-                    continue;
-                }
-
-                String operation =
-                        parts[0];
-
-                String data =
-                        parts[1];
-
-                // ---------------------------------
-                // INSERT RECOVERY
-                // ---------------------------------
-
-                if (operation.equalsIgnoreCase(
-                        "INSERT")) {
-
-                    String[] insertParts =
-                            data.split("\\|", 2);
-
-                    if (insertParts.length != 2) {
-                        continue;
-                    }
-
-                    String tableName =
-                            insertParts[0];
-
-                    String rowData =
-                            insertParts[1];
-
-                    String[] values =
-                            rowData.split(",");
-
-                    if (values.length == 0) {
-                        continue;
-                    }
-
-                    String id =
-                            values[0].trim();
-
-                    Table table =
-                            database.getTable(
-                                    tableName
-                            );
-
-                    // Recreate table if necessary
-                    if (table == null) {
-
-                        database.execute(
-                                "create table "
-                                        + tableName,
-                                true
-                        );
-
-                        table =
-                                database.getTable(
-                                        tableName
-                                );
-                    }
-
-                    // Check for duplicate row
-                    boolean alreadyExists =
-                            false;
-
-                    if (table != null) {
-
-                        for (Row row :
-                                table.getRows()) {
-
-                            if (!row.getValues().isEmpty()
-                                    && row.getValues()
-                                    .get(0)
-                                    .trim()
-                                    .equals(id)) {
-
-                                alreadyExists = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    // Insert only if missing
-                    if (!alreadyExists) {
-
-                        database.execute(
-                                "insert into "
-                                        + tableName
-                                        + " "
-                                        + rowData,
-                                true
-                        );
-                    }
-
-                    recovered = true;
-                }
-
-                // ---------------------------------
-                // DELETE RECOVERY
-                // ---------------------------------
-
-                else if (
-                        operation.equalsIgnoreCase(
-                                "DELETE"
-                        )
-                ) {
-
-                    String[] deleteParts =
-                            data.split("\\|", 2);
-
-                    if (deleteParts.length != 2) {
-                        continue;
-                    }
-
-                    String tableName =
-                            deleteParts[0];
-
-                    String id =
-                            deleteParts[1].trim();
-
-                    Table table =
-                            database.getTable(
-                                    tableName
-                            );
-
-                    if (table == null) {
-                        continue;
-                    }
-
-                    database.execute(
-                            "delete from "
-                                    + tableName
-                                    + " "
-                                    + id,
-                            true
-                    );
-
-                    recovered = true;
-                }
-
-                // ---------------------------------
-                // UPDATE RECOVERY
-                // ---------------------------------
-
-                else if (
-                        operation.equalsIgnoreCase(
-                                "UPDATE"
-                        )
-                ) {
-
-                    String[] updateParts =
-                            data.split("\\|", 4);
-
-                    if (updateParts.length != 4) {
-                        continue;
-                    }
-
-                    String tableName =
-                            updateParts[0];
-
-                    String id =
-                            updateParts[1].trim();
-
-                    int columnIndex;
-
-                    try {
-
-                        columnIndex =
-                                Integer.parseInt(
-                                        updateParts[2].trim()
-                                );
-
-                    } catch (NumberFormatException e) {
-
-                        continue;
-                    }
-
-                    String newValue =
-                            updateParts[3];
-
-                    Table table =
-                            database.getTable(
-                                    tableName
-                            );
-
-                    if (table == null) {
-                        continue;
-                    }
-
-                    for (Row row :
-                            table.getRows()) {
-
-                        if (row.getValues().isEmpty()) {
-                            continue;
-                        }
-
-                        if (row.getValues()
-                                .get(0)
-                                .trim()
-                                .equals(id)) {
-
-                            if (columnIndex >= 0
-                                    && columnIndex
-                                    < row.getValues().size()) {
-
-                                row.getValues()
-                                        .set(
-                                                columnIndex,
-                                                newValue
-                                        );
-                            }
-                        }
-                    }
-
-                    recovered = true;
-                }
-            }
-
-            // ---------------------------------
-            // SAVE RECOVERED DATABASE
-            // ---------------------------------
-
-            if (recovered) {
-
-                database.saveDatabase(true);
-            }
-
-            System.out.println(
-                    "WAL recovery: "
-                            + fileName
-                            + " ✓"
-            );
-
-        } catch (Exception e) {
-
-            System.out.println(
-                    "WAL recovery error: "
-                            + e.getMessage()
-            );
-        }
+    @Override
+    public synchronized void close() throws IOException {
+        channel.close();
     }
 }

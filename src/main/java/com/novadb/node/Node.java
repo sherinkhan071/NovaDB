@@ -1,38 +1,39 @@
-
 package com.novadb.node;
 
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import com.novadb.engine.Database;
-import com.novadb.engine.WriteAheadLog;
-import com.novadb.model.Row;
-import com.novadb.model.Table;
+import com.novadb.engine.DatabaseException;
 
+/** One database server. Requests are single lines: OPERATION|argument|... */
 public class Node {
 
-    private String nodeId;
-    private int port;
+    private static final int TIMEOUT_MS = 5000;
 
-    private Database database;
-    private WriteAheadLog wal;
-    private int requestCount = 0;
+    private final String nodeId;
+    private final int requestedPort;
+    private final Database database;
+    private final AtomicInteger requestCount = new AtomicInteger();
 
-    public Node(String nodeId, int port) {
+    private volatile ServerSocket serverSocket;
+    private Thread acceptor;
+
+    /** @param port TCP port, or 0 to let the system choose one */
+    public Node(String nodeId, int port, Path dataDirectory) {
 
         this.nodeId = nodeId;
-        this.port = port;
-
+        this.requestedPort = port;
         this.database = new Database(
-                "novadb-" + nodeId.toLowerCase() + ".data"
-        );
-
-        this.wal = new WriteAheadLog(nodeId);
-
-        this.wal.recover(database);
+                dataDirectory.resolve("novadb-" + nodeId.toLowerCase() + ".wal"));
     }
 
     public String getNodeId() {
@@ -40,668 +41,144 @@ public class Node {
     }
 
     public int getPort() {
-        return port;
+        return serverSocket == null ? requestedPort : serverSocket.getLocalPort();
     }
 
-    // -----------------------------------------
-    // START NODE
-    // -----------------------------------------
+    /** The port is open when this returns; it throws if the port is taken. */
+    public void start() throws IOException {
 
-    public void start() {
+        ServerSocket server = new ServerSocket(
+                requestedPort, 50, InetAddress.getLoopbackAddress());
+        serverSocket = server;
 
-        Thread serverThread = new Thread(() -> {
-
-            try (
-                    ServerSocket serverSocket =
-                            new ServerSocket(port)
-            ) {
-
-                System.out.println(
-                        nodeId
-                                + " listening on port "
-                                + port
-                );
-
-                while (true) {
-
-                    Socket socket =
-                            serverSocket.accept();
-
-                    Thread clientThread =
-                            new Thread(() ->
-                                    handleConnection(socket)
-                            );
-
-                    clientThread.start();
+        acceptor = new Thread(() -> {
+            while (!server.isClosed()) {
+                try {
+                    Socket socket = server.accept();
+                    Thread worker = new Thread(() -> handle(socket));
+                    worker.setDaemon(true);
+                    worker.start();
+                } catch (IOException e) {
+                    if (!server.isClosed()) {
+                        System.out.println(nodeId + " accept error: " + e.getMessage());
+                    }
                 }
-
-            } catch (Exception e) {
-
-                System.out.println(
-                        nodeId
-                                + " could not start: "
-                                + e.getMessage()
-                );
             }
+        }, nodeId + "-acceptor");
 
-        });
-
-        serverThread.start();
+        acceptor.start();
     }
 
-    // -----------------------------------------
-    // HANDLE CONNECTION
-    // -----------------------------------------
-
-    private void handleConnection(Socket socket) {
-
-        try (
-                BufferedReader reader =
-                        new BufferedReader(
-                                new InputStreamReader(
-                                        socket.getInputStream()
-                                )
-                        );
-
-                PrintWriter writer =
-                        new PrintWriter(
-                                socket.getOutputStream(),
-                                true
-                        )
-        ) {
-
-            String message =
-                    reader.readLine();
-
-            if (message == null || message.trim().isEmpty()) {
-
-                writer.println(
-                        "ERROR|Empty message"
-                );
-
-                return;
-            }
-
-            NodeMessage nodeMessage =
-                    parseMessage(message);
-
-            String result =
-                    processOperation(nodeMessage);
-
-            writer.println(result);
-
-        } catch (Exception e) {
-
-            System.out.println(
-                    nodeId
-                            + " connection error: "
-                            + e.getMessage()
-            );
-        }
-    }
-
-    // -----------------------------------------
-    // PARSE MESSAGE
-    // -----------------------------------------
-
-    private NodeMessage parseMessage(
-            String message) {
-
-        String[] parts =
-                message.split("\\|", 2);
-
-        String operation =
-                parts[0];
-
-        String data = "";
-
-        if (parts.length > 1) {
-            data = parts[1];
-        }
-
-        return new NodeMessage(
-                operation,
-                data
-        );
-    }
-
-    // -----------------------------------------
-    // PROCESS OPERATION
-    // -----------------------------------------
-
-    private synchronized String processOperation(
-            NodeMessage message) {
-
-        requestCount++;
-
-        String operation =
-                message.getOperation();
-
-        String data =
-                message.getData();
-
-        if (operation.equalsIgnoreCase(
-                "CREATE_TABLE")) {
-
-            processCreateTable(data);
-
-            return "SUCCESS|CREATE_TABLE";
-        }
-
-        else if (operation.equalsIgnoreCase(
-                "INSERT")) {
-
-            processInsert(data);
-
-            return "SUCCESS|INSERT";
-        }
-
-        else if (operation.equalsIgnoreCase(
-                "HEALTH")) {
-
-            return "SUCCESS|HEALTH";
-        }
-
-        else if (operation.equalsIgnoreCase(
-                "STATS")) {
-
-            return processStats();
-        }
-
-        else if (operation.equalsIgnoreCase(
-                "QUERY")) {
-
-            return processQuery(data);
-        }
-
-        else if (operation.equalsIgnoreCase(
-                "DELETE")) {
-
-            return processDelete(data);
-        }
-
-        else if (operation.equalsIgnoreCase(
-                "UPDATE")) {
-
-            return processUpdate(data);
-        }
-
-        else if (operation.equalsIgnoreCase(
-                "SHOW_TABLES")) {
-
-            return processShowTables();
-        }
-
-        else if (operation.equalsIgnoreCase(
-                "REPLICATE")) {
-
-            processInsert(data);
-
-            return "SUCCESS|REPLICATE";
-        }
-
-        else {
-
-            return "ERROR|Unknown operation";
-        }
-    }
-
-    // -----------------------------------------
-    // CREATE TABLE
-    // -----------------------------------------
-
-    private void processCreateTable(
-            String tableName) {
-
-        if (database.getTable(tableName) != null) {
-            return;
-        }
-
-        String command =
-                "create table "
-                        + tableName;
-
-        database.execute(command);
-    }
-
-    // -----------------------------------------
-    // INSERT
-    // -----------------------------------------
-
-    private void processInsert(
-            String data) {
-
-        String[] parts =
-                data.split("\\|", 2);
-
-        if (parts.length < 2) {
-            return;
-        }
-
-        String tableName =
-                parts[0];
-
-        String values =
-                parts[1];
-
-        // WAL before database operation
-        wal.log(
-                "INSERT",
-                tableName
-                        + "|"
-                        + values
-        );
-
-        String command =
-                "insert into "
-                        + tableName
-                        + " "
-                        + values;
-
-        database.execute(command);
-    }
-
-    // -----------------------------------------
-    // QUERY
-    // -----------------------------------------
-
-    private String processQuery(
-            String tableName) {
-
-        Table table =
-                database.getTable(tableName);
-
-        if (table == null) {
-
-            return "ERROR|Table not found";
-        }
-
-        StringBuilder result =
-                new StringBuilder();
-
-        for (Row row :
-                table.getRows()) {
-
-            for (int i = 0;
-                 i < row.getValues().size();
-                 i++) {
-
-                if (i > 0) {
-                    result.append(",");
-                }
-
-                result.append(
-                        row.getValues().get(i)
-                );
-            }
-
-            result.append(";");
-        }
-
-        if (result.length() == 0) {
-            return "SUCCESS|";
-        }
-
-        return "SUCCESS|"
-                + result;
-    }
-
-    // -----------------------------------------
-    // SHOW TABLES
-    // -----------------------------------------
-
-    private String processShowTables() {
-
-        StringBuilder result =
-                new StringBuilder();
-
-        /*
-         * Database exposes its tables through
-         * getTables().
-         */
-        for (String tableName :
-                database.getTables().keySet()) {
-
-            if (result.length() > 0) {
-                result.append(",");
-            }
-
-            result.append(tableName);
-        }
-
-        return "SUCCESS|"
-                + result;
-    }
-
-    // -----------------------------------------
-    // DELETE
-    // -----------------------------------------
-
-    private String processDelete(
-            String data) {
-
-        String[] parts =
-                data.split("\\|", 2);
-
-        if (parts.length < 2) {
-
-            return "ERROR|Invalid DELETE data";
-        }
-
-        String tableName =
-                parts[0];
-
-        String id =
-                parts[1].trim();
-
-        Table table =
-                database.getTable(tableName);
-
-        if (table == null) {
-
-            return "ERROR|Table not found";
-        }
-
-        int beforeSize =
-                table.getRows().size();
-
-        table.getRows().removeIf(
-                row ->
-                        !row.getValues().isEmpty()
-                                && row.getValues()
-                                .get(0)
-                                .trim()
-                                .equals(id)
-        );
-
-        int afterSize =
-                table.getRows().size();
-
-        boolean deleted =
-                beforeSize != afterSize;
-
-        if (deleted) {
-
-            wal.log(
-                    "DELETE",
-                    tableName
-                            + "|"
-                            + id
-            );
-
-            database.saveDatabase();
-
-            return "SUCCESS|DELETE";
-        }
-
-        return "ERROR|Row not found";
-    }
-
-    // -----------------------------------------
-    // UPDATE
-    // -----------------------------------------
-
-    private String processUpdate(
-            String data) {
-
-        String[] parts =
-                data.split("\\|", 4);
-
-        if (parts.length < 4) {
-
-            return "ERROR|Invalid UPDATE data";
-        }
-
-        String tableName =
-                parts[0];
-
-        String id =
-                parts[1].trim();
-
-        int columnIndex;
+    /** Stops accepting connections. The data stays open until close(). */
+    public void stop() {
 
         try {
-
-            columnIndex =
-                    Integer.parseInt(
-                            parts[2].trim()
-                    );
-
-        } catch (NumberFormatException e) {
-
-            return "ERROR|Invalid column index";
-        }
-
-        String newValue =
-                parts[3].trim();
-
-        Table table =
-                database.getTable(tableName);
-
-        if (table == null) {
-
-            return "ERROR|Table not found";
-        }
-
-        for (Row row :
-                table.getRows()) {
-
-            if (row.getValues().isEmpty()) {
-                continue;
+            if (serverSocket != null) {
+                serverSocket.close();
             }
 
-            if (row.getValues()
-                    .get(0)
-                    .trim()
-                    .equals(id)) {
+            // The port is only released once the accept thread has returned.
+            if (acceptor != null) {
+                acceptor.join();
+            }
+        } catch (IOException e) {
+            System.out.println(nodeId + " stop error: " + e.getMessage());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
 
-                if (columnIndex < 0
-                        || columnIndex
-                        >= row.getValues().size()) {
+    public void close() {
 
-                    return "ERROR|Column index out of range";
+        stop();
+
+        try {
+            database.close();
+        } catch (IOException e) {
+            System.out.println(nodeId + " close error: " + e.getMessage());
+        }
+    }
+
+    private void handle(Socket socket) {
+
+        try (socket;
+             BufferedReader reader = new BufferedReader(new InputStreamReader(
+                     socket.getInputStream(), StandardCharsets.UTF_8));
+             PrintWriter writer = new PrintWriter(
+                     socket.getOutputStream(), true, StandardCharsets.UTF_8)) {
+
+            socket.setSoTimeout(TIMEOUT_MS);
+
+            String request = reader.readLine();
+
+            if (request != null) {
+                writer.println(process(request));
+            }
+
+        } catch (IOException e) {
+            System.out.println(nodeId + " connection error: " + e.getMessage());
+        }
+    }
+
+    private String process(String request) {
+
+        requestCount.incrementAndGet();
+
+        String[] f = request.split("\\|", -1);
+
+        try {
+            switch (f[0]) {
+                case "CREATE_TABLE" -> {
+                    require(f, 2);
+                    database.createTable(f[1]);
                 }
-
-                row.getValues()
-                        .set(
-                                columnIndex,
-                                newValue
-                        );
-
-                wal.log(
-                        "UPDATE",
-                        tableName
-                                + "|"
-                                + id
-                                + "|"
-                                + columnIndex
-                                + "|"
-                                + newValue
-                );
-
-                database.saveDatabase();
-
-                return "SUCCESS|UPDATE";
+                case "DROP_TABLE" -> {
+                    require(f, 2);
+                    database.dropTable(f[1]);
+                }
+                case "INSERT" -> {
+                    require(f, 3);
+                    database.insert(f[1], f[2]);
+                }
+                case "UPDATE" -> {
+                    require(f, 5);
+                    database.update(f[1], f[2], Integer.parseInt(f[3]), f[4]);
+                }
+                case "DELETE" -> {
+                    require(f, 3);
+                    database.delete(f[1], f[2]);
+                }
+                case "QUERY" -> {
+                    require(f, 2);
+                    return "SUCCESS|" + String.join(";", database.select(f[1]));
+                }
+                case "SHOW_TABLES" -> {
+                    return "SUCCESS|" + String.join(",", database.tableNames());
+                }
+                case "HEALTH" -> {
+                    return "SUCCESS|HEALTH";
+                }
+                case "STATS" -> {
+                    return "SUCCESS|" + database.rowCount() + "|" + requestCount.get();
+                }
+                default -> {
+                    return "ERROR|Unknown operation";
+                }
             }
-        }
 
-        return "ERROR|Row not found";
-    }
+            return "SUCCESS|" + f[0];
 
-    // -----------------------------------------
-    // SEND MESSAGE
-    // -----------------------------------------
-
-    public void sendMessage(
-            String host,
-            int targetPort,
-            String message) {
-
-        try (
-                Socket socket =
-                        new Socket(
-                                host,
-                                targetPort
-                        );
-
-                PrintWriter writer =
-                        new PrintWriter(
-                                socket.getOutputStream(),
-                                true
-                        );
-
-                BufferedReader reader =
-                        new BufferedReader(
-                                new InputStreamReader(
-                                        socket.getInputStream()
-                                )
-                        )
-        ) {
-
-            writer.println(message);
-
-            reader.readLine();
-
-        } catch (Exception e) {
-
-            System.out.println(
-                    nodeId
-                            + " could not send message: "
-                            + e.getMessage()
-            );
+        } catch (DatabaseException e) {
+            return "ERROR|" + e.getMessage();
+        } catch (NumberFormatException e) {
+            return "ERROR|Invalid number";
         }
     }
 
-    // -----------------------------------------
-    // SEND QUERY
-    // -----------------------------------------
+    private static void require(String[] fields, int count) {
 
-    public String sendQuery(
-            String host,
-            int targetPort,
-            String tableName) {
-
-        try (
-                Socket socket =
-                        new Socket(
-                                host,
-                                targetPort
-                        );
-
-                PrintWriter writer =
-                        new PrintWriter(
-                                socket.getOutputStream(),
-                                true
-                        );
-
-                BufferedReader reader =
-                        new BufferedReader(
-                                new InputStreamReader(
-                                        socket.getInputStream()
-                                )
-                        )
-        ) {
-
-            NodeMessage message =
-                    new NodeMessage(
-                            "QUERY",
-                            tableName
-                    );
-
-            writer.println(
-                    message.toString()
-            );
-
-            return reader.readLine();
-
-        } catch (Exception e) {
-
-            return "ERROR|"
-                    + e.getMessage();
+        if (fields.length != count) {
+            throw new DatabaseException("Malformed request");
         }
     }
-
-    // -----------------------------------------
-    // SEND OPERATION
-    // -----------------------------------------
-
-    public void sendOperation(
-            String host,
-            int targetPort,
-            String operation,
-            String data) {
-
-        NodeMessage message =
-                new NodeMessage(
-                        operation,
-                        data
-                );
-
-        sendMessage(
-                host,
-                targetPort,
-                message.toString()
-        );
-    }
-
-    // -----------------------------------------
-    // STATISTICS
-    // -----------------------------------------
-
-    private String processStats() {
-
-        int rowCount = 0;
-
-        Table table =
-                database.getTable("students");
-
-        if (table != null) {
-
-            rowCount =
-                    table.getRows().size();
-        }
-
-        return "SUCCESS|"
-                + nodeId
-                + "|rows="
-                + rowCount
-                + "|requests="
-                + requestCount;
-    }
-    public String sendOperationAndGetResponse(
-        String host,
-        int targetPort,
-        String operation,
-        String data) {
-
-    try (
-        java.net.Socket socket =
-                new java.net.Socket(host, targetPort);
-
-        java.io.PrintWriter writer =
-                new java.io.PrintWriter(
-                        socket.getOutputStream(),
-                        true
-                );
-
-        java.io.BufferedReader reader =
-                new java.io.BufferedReader(
-                        new java.io.InputStreamReader(
-                                socket.getInputStream()
-                        )
-                )
-    ) {
-
-        NodeMessage message =
-                new NodeMessage(operation, data);
-
-        writer.println(message.toString());
-
-        return reader.readLine();
-
-    } catch (Exception e) {
-
-        return "ERROR|" + e.getMessage();
-    }
-}
 }
