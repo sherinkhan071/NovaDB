@@ -73,18 +73,19 @@ mvn test
 java -cp target/classes com.novadb.NovaDBApplication bench cluster.properties 8 2000
 ```
 
-## Sample results
+## Results
 
-Measured on a 2-core cloud machine with all three nodes and the clients on it,
-2,000 inserts per run, one run each. Your numbers will differ.
+Measured on a MacBook Air (Apple M5, 10 cores) with all three nodes and the
+clients on the same machine, 2,000 inserts per run, one run each. Your numbers
+will differ.
 
 | Clients | Writes/sec | p50 | p99 |
 |---|---|---|---|
-| 1 | 789 | 0.9 ms | 5.0 ms |
-| 8 | 1703 | 3.6 ms | 19.4 ms |
-| 32 | 2078 | 12.7 ms | 44.5 ms |
+| 1 | 90 | 11.9 ms | 15.9 ms |
+| 8 | 168 | 47.1 ms | 76.0 ms |
+| 32 | 221 | 145.0 ms | 232.9 ms |
 
-In five forced leader kills, writes resumed after 0.58 to 1.15 s (as seen by the
+In five forced leader kills, writes resumed after 0.53 to 0.70 s (as seen by the
 client, with a 400 to 800 ms election timeout).
 
 ## Design decisions
